@@ -17,6 +17,7 @@ Jimbo Cam's config is in `~/.config/jimbo-cam/` by default.
 
 > [!NOTE]
 > **You can't upload to Prusa Connect faster then every 10 seconds.**
+> 
 > _They are providing this service for free - don't complain!_
 
 ## Extra
