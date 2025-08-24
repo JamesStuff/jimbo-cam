@@ -12,13 +12,13 @@ import subprocess
 import getpass
 import sys
 
-# ───────── Config Paths ─────────
+# ======== Config Paths ========
 CONFIG_DIR = Path.home() / ".config" / "jimbo-cam"
 ENV_PATH = CONFIG_DIR / "jimbo-cam-config.env"
 FINGERPRINT_FILE = CONFIG_DIR / "fingerprint.txt"
 SERVICE_PATH = Path("/etc/systemd/system/jimbo-cam.service")
 
-# ───────── Configuration via Environment ─────────
+# ======== Environment Variables ========
 PRUSA_URL = os.getenv("PRUSA_URL", "https://webcam.connect.prusa3d.com/c/snapshot")
 PRUSA_TOKEN = os.getenv("PRUSA_TOKEN", "").strip()
 PRUSA_FINGERPRINT = os.getenv("PRUSA_FINGERPRINT", "").strip()
@@ -29,7 +29,7 @@ JPEG_QUALITY = int(os.getenv("PRUSA_JPEG_QUALITY", "85"))
 TIMEOUT = float(os.getenv("PRUSA_HTTP_TIMEOUT", "10"))
 
 
-# ───────── Setup ─────────
+# ======== Setup ========
 def run_setup():
     print("=== Jimbo-Cam Setup ===")
     if os.geteuid() != 0:
@@ -40,7 +40,6 @@ def run_setup():
     token = input("Prusa Connect Camera Token: ").strip()
     fingerprint = input("Enter Fingerprint (leave blank to auto-generate): ").strip()
 
-    # Save env file
     CONFIG_DIR.mkdir(parents=True, exist_ok=True)
     with open(ENV_PATH, "w") as f:
         f.write(f"PRUSA_TOKEN={token}\n")
@@ -96,7 +95,7 @@ WantedBy=multi-user.target
         print("You can check logs with: journalctl -u jimbo-cam.service -f")
 
 
-# ───────── Logging ─────────
+# ======== Logging ========
 logging.basicConfig(
     level=logging.INFO,
     format="[%(asctime)s] [%(levelname)s] %(message)s",
@@ -105,7 +104,6 @@ logging.basicConfig(
 logger = logging.getLogger("prusa-picam")
 
 
-# ───────── Helpers ─────────
 def get_or_create_fingerprint() -> str:
     FINGERPRINT_FILE.parent.mkdir(parents=True, exist_ok=True)
     if FINGERPRINT_FILE.exists():
