@@ -20,6 +20,24 @@ ENV_PATH = CONFIG_DIR / "jimbo-cam-config.env"
 FINGERPRINT_FILE = CONFIG_DIR / "fingerprint.txt"
 SERVICE_PATH = Path("/etc/systemd/system/jimbo-cam.service")
 
+
+# ======== Load Environment File ========
+def load_env_file(path: Path):
+    """Load key=value pairs from an env file into os.environ (only if not already set)."""
+    if not path.exists():
+        return
+    with open(path) as f:
+        for line in f:
+            line = line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            key, value = line.split("=", 1)
+            os.environ.setdefault(key.strip(), value.strip())
+
+
+load_env_file(ENV_PATH)
+
+
 # ======== Environment Variables ========
 PRUSA_URL = os.getenv("PRUSA_URL", "https://webcam.connect.prusa3d.com/c/snapshot")
 PRUSA_TOKEN = os.getenv("PRUSA_TOKEN", "").strip()
@@ -33,18 +51,43 @@ PRUSA_AF_MODE = os.getenv("PRUSA_AF_MODE", "cont").strip().lower()
 PRUSA_AF_POSITION = os.getenv("PRUSA_AF_POSITION", "").strip()
 
 
-# ======== Setup ========
+# ======== Setup Wizard ========
 def run_setup():
+    import pwd
+
     print("=== Jimbo-Cam Setup ===")
     if os.geteuid() != 0:
         print("Error: Setup must be run with sudo (root privileges).")
         print("Try:  sudo python3", Path(__file__).name, "--setup")
         sys.exit(1)
 
+    # ===== Select User =====
+    def list_candidate_users():
+        users = ["root"]  # always include root
+        for p in pwd.getpwall():
+            if p.pw_uid >= 1000 and "home" in p.pw_dir:
+                users.append(p.pw_name)
+        return users
+
+    users = list_candidate_users()
+    print("\nSelect which user should run jimbo-cam:")
+    for i, u in enumerate(users, 1):
+        print(f"  [{i}] {u}")
+    default_index = 1 if len(users) > 1 else 0  # first non-root if available
+    choice = input(
+        f"Enter choice [1-{len(users)}] (default {default_index+1} = {users[default_index]}): "
+    ).strip()
+    if choice.isdigit() and 1 <= int(choice) <= len(users):
+        user = users[int(choice) - 1]
+    else:
+        user = users[default_index]
+    print(f"[+] Selected user: {user}")
+
+    # ===== Collect Token / Fingerprint =====
     token = input("Prusa Connect Camera Token: ").strip()
     fingerprint = input("Enter Fingerprint (leave blank to auto-generate): ").strip()
 
-    # === Autofocus config ===
+    # ===== Autofocus config =====
     print("\nAutofocus Configuration:")
     print("  [1] Continuous (default)")
     print("  [2] Auto (single autofocus cycle)")
@@ -53,7 +96,6 @@ def run_setup():
 
     af_mode = "cont"
     af_position = ""
-
     if af_choice == "2":
         af_mode = "auto"
     elif af_choice == "3":
@@ -63,8 +105,12 @@ def run_setup():
             print("Error: Manual mode requires a lens position")
             sys.exit(1)
 
-    CONFIG_DIR.mkdir(parents=True, exist_ok=True)
-    with open(ENV_PATH, "w") as f:
+    # ===== Write config file =====
+    home_dir = "/root" if user == "root" else f"/home/{user}"
+    config_dir = Path(home_dir) / ".config" / "jimbo-cam"
+    env_path = config_dir / "jimbo-cam-config.env"
+    config_dir.mkdir(parents=True, exist_ok=True)
+    with open(env_path, "w") as f:
         f.write(f"PRUSA_TOKEN={token}\n")
         if fingerprint:
             f.write(f"PRUSA_FINGERPRINT={fingerprint}\n")
@@ -76,9 +122,9 @@ def run_setup():
         f.write(f"PRUSA_AF_MODE={af_mode}\n")
         if af_position:
             f.write(f"PRUSA_AF_POSITION={af_position}\n")
-    print(f"[+] Saved config to {ENV_PATH}")
+    print(f"[+] Saved config to {env_path}")
 
-    # Create systemd service file
+    # ===== Write systemd unit =====
     service_unit = f"""[Unit]
 Description=Prusa Connect Picamera Uploader by James Robinson
 After=network-online.target
@@ -86,9 +132,9 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-User={getpass.getuser()}
+User={user}
 WorkingDirectory={Path(__file__).parent}
-EnvironmentFile={ENV_PATH}
+EnvironmentFile={env_path}
 ExecStart=/usr/bin/env python3 {Path(__file__).absolute()}
 Restart=on-failure
 RestartSec=10
@@ -117,19 +163,17 @@ WantedBy=multi-user.target
         print("You can check logs with: journalctl -u jimbo-cam.service -f")
     else:
         print("You can enable and start manually with:")
-        print("  sudo systemctl enable --now jimbo-cam.service\n")
+        print(f"  sudo systemctl enable --now jimbo-cam.service")
         print("You can check logs with: journalctl -u jimbo-cam.service -f")
 
 
+# ======== Argparse ========
 def parse_args():
     parser = argparse.ArgumentParser(description="Jimbo-Cam uploader for Prusa Connect")
-
     parser.add_argument("--setup", action="store_true", help="Run interactive setup")
-
     parser.add_argument(
         "--af", nargs="+", help="Autofocus mode. Example: '--af cont' or '--af man 1.2'"
     )
-
     return parser.parse_args()
 
 
@@ -142,6 +186,7 @@ logging.basicConfig(
 logger = logging.getLogger("prusa-picam")
 
 
+# ======== Fingerprint Handling ========
 def get_or_create_fingerprint() -> str:
     FINGERPRINT_FILE.parent.mkdir(parents=True, exist_ok=True)
     if FINGERPRINT_FILE.exists():
@@ -155,6 +200,7 @@ def get_or_create_fingerprint() -> str:
     return fp
 
 
+# ======== Camera Handling ========
 def capture_jpeg(picam: Picamera2) -> bytes:
     tmp = Path("/tmp/prusa_snapshot.jpg")
     logger.debug(f"Configuring camera: {WIDTH}x{HEIGHT}")
@@ -176,6 +222,7 @@ def capture_jpeg(picam: Picamera2) -> bytes:
     return data
 
 
+# ======== Upload Handling ========
 def upload_snapshot(jpeg_bytes: bytes, token: str, fingerprint: str) -> None:
     headers = {
         "accept": "*/*",
@@ -189,7 +236,9 @@ def upload_snapshot(jpeg_bytes: bytes, token: str, fingerprint: str) -> None:
     logger.info(f"Upload successful (HTTP {resp.status_code})")
 
 
+# ======== Autofocus Config ========
 def configure_autofocus(picam, cli_af):
+    print("Configuring af")
     if cli_af:  # CLI takes priority
         mode = cli_af[0].lower()
         pos = cli_af[1] if len(cli_af) > 1 else None
@@ -221,6 +270,7 @@ def configure_autofocus(picam, cli_af):
         raise ValueError(f"Unknown autofocus mode: {mode}")
 
 
+# ======== Main Loop ========
 running = True
 
 
@@ -228,10 +278,7 @@ def _stop(signum, frame):
     global running
     logger.info("Termination signal received; stopping...")
     running = False
-
-
-signal.signal(signal.SIGINT, _stop)
-signal.signal(signal.SIGTERM, _stop)
+    sys.exit(0)
 
 
 def main():
@@ -242,8 +289,6 @@ def main():
     fingerprint = PRUSA_FINGERPRINT or get_or_create_fingerprint()
     logger.info(f"Using fingerprint: {fingerprint}")
 
-    picam = Picamera2()
-    picam.set_controls({"AfMode": controls.AfModeEnum.Continuous})
     logger.info(f"Uploader initialized: URL={PRUSA_URL}, interval={INTERVAL_SEC}s")
 
     backoff = INTERVAL_SEC
@@ -271,12 +316,16 @@ def main():
     logger.info("Exiting...")
 
 
+# ======== Entry Point ========
 if __name__ == "__main__":
     args = parse_args()
 
     if args.setup:
         run_setup()
     else:
+        signal.signal(signal.SIGINT, _stop)
+        signal.signal(signal.SIGTERM, _stop)
+
         try:
             picam = Picamera2()
             configure_autofocus(picam, args.af)
