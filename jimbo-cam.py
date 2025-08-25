@@ -29,7 +29,6 @@ WIDTH = int(os.getenv("PRUSA_WIDTH", "1280"))
 HEIGHT = int(os.getenv("PRUSA_HEIGHT", "720"))
 JPEG_QUALITY = int(os.getenv("PRUSA_JPEG_QUALITY", "85"))
 TIMEOUT = float(os.getenv("PRUSA_HTTP_TIMEOUT", "10"))
-
 PRUSA_AF_MODE = os.getenv("PRUSA_AF_MODE", "cont").strip().lower()
 PRUSA_AF_POSITION = os.getenv("PRUSA_AF_POSITION", "").strip()
 
