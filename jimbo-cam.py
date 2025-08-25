@@ -7,10 +7,12 @@ import logging
 import requests
 from pathlib import Path
 from picamera2 import Picamera2
+from libcamera import controls
 
 import subprocess
 import getpass
 import sys
+import argparse
 
 # ======== Config Paths ========
 CONFIG_DIR = Path.home() / ".config" / "jimbo-cam"
@@ -28,6 +30,9 @@ HEIGHT = int(os.getenv("PRUSA_HEIGHT", "720"))
 JPEG_QUALITY = int(os.getenv("PRUSA_JPEG_QUALITY", "85"))
 TIMEOUT = float(os.getenv("PRUSA_HTTP_TIMEOUT", "10"))
 
+PRUSA_AF_MODE = os.getenv("PRUSA_AF_MODE", "cont").strip().lower()
+PRUSA_AF_POSITION = os.getenv("PRUSA_AF_POSITION", "").strip()
+
 
 # ======== Setup ========
 def run_setup():
@@ -40,6 +45,25 @@ def run_setup():
     token = input("Prusa Connect Camera Token: ").strip()
     fingerprint = input("Enter Fingerprint (leave blank to auto-generate): ").strip()
 
+    # === Autofocus config ===
+    print("\nAutofocus Configuration:")
+    print("  [1] Continuous (default)")
+    print("  [2] Auto (single autofocus cycle)")
+    print("  [3] Manual (requires lens position)")
+    af_choice = input("Select autofocus mode [1/2/3]: ").strip() or "1"
+
+    af_mode = "cont"
+    af_position = ""
+
+    if af_choice == "2":
+        af_mode = "auto"
+    elif af_choice == "3":
+        af_mode = "man"
+        af_position = input("Enter manual lens position (e.g. 1.2): ").strip()
+        if not af_position:
+            print("Error: Manual mode requires a lens position")
+            sys.exit(1)
+
     CONFIG_DIR.mkdir(parents=True, exist_ok=True)
     with open(ENV_PATH, "w") as f:
         f.write(f"PRUSA_TOKEN={token}\n")
@@ -50,6 +74,9 @@ def run_setup():
         f.write("PRUSA_HEIGHT=720\n")
         f.write("PRUSA_JPEG_QUALITY=85\n")
         f.write("PRUSA_HTTP_TIMEOUT=10\n")
+        f.write(f"PRUSA_AF_MODE={af_mode}\n")
+        if af_position:
+            f.write(f"PRUSA_AF_POSITION={af_position}\n")
     print(f"[+] Saved config to {ENV_PATH}")
 
     # Create systemd service file
@@ -91,8 +118,20 @@ WantedBy=multi-user.target
         print("You can check logs with: journalctl -u jimbo-cam.service -f")
     else:
         print("You can enable and start manually with:")
-        print("  sudo systemctl enable --now jimbo-cam.service")
+        print("  sudo systemctl enable --now jimbo-cam.service\n")
         print("You can check logs with: journalctl -u jimbo-cam.service -f")
+
+
+def parse_args():
+    parser = argparse.ArgumentParser(description="Jimbo-Cam uploader for Prusa Connect")
+
+    parser.add_argument("--setup", action="store_true", help="Run interactive setup")
+
+    parser.add_argument(
+        "--af", nargs="+", help="Autofocus mode. Example: '--af cont' or '--af man 1.2'"
+    )
+
+    return parser.parse_args()
 
 
 # ======== Logging ========
@@ -151,6 +190,38 @@ def upload_snapshot(jpeg_bytes: bytes, token: str, fingerprint: str) -> None:
     logger.info(f"Upload successful (HTTP {resp.status_code})")
 
 
+def configure_autofocus(picam, cli_af):
+    if cli_af:  # CLI takes priority
+        mode = cli_af[0].lower()
+        pos = cli_af[1] if len(cli_af) > 1 else None
+    else:  # fallback to env
+        mode = PRUSA_AF_MODE
+        pos = PRUSA_AF_POSITION or None
+
+    logger.info(f"Configuring autofocus: mode={mode}, position={pos}")
+
+    if mode in ["cont", "continuous"]:
+        picam.set_controls({"AfMode": controls.AfModeEnum.Continuous})
+    elif mode in ["auto", "af"]:
+        picam.set_controls({"AfMode": controls.AfModeEnum.Auto})
+    elif mode in ["man", "manual"]:
+        if not pos:
+            raise ValueError("Manual mode requires a lens position, e.g. --af man 1.2")
+        try:
+            lens_pos = float(pos)
+        except ValueError:
+            raise ValueError(f"Invalid manual lens position: {pos}")
+
+        picam.set_controls(
+            {
+                "AfMode": controls.AfModeEnum.Manual,
+                "LensPosition": lens_pos,
+            }
+        )
+    else:
+        raise ValueError(f"Unknown autofocus mode: {mode}")
+
+
 running = True
 
 
@@ -173,6 +244,7 @@ def main():
     logger.info(f"Using fingerprint: {fingerprint}")
 
     picam = Picamera2()
+    picam.set_controls({"AfMode": controls.AfModeEnum.Continuous})
     logger.info(f"Uploader initialized: URL={PRUSA_URL}, interval={INTERVAL_SEC}s")
 
     backoff = INTERVAL_SEC
@@ -201,7 +273,15 @@ def main():
 
 
 if __name__ == "__main__":
-    if "--setup" in sys.argv:
+    args = parse_args()
+
+    if args.setup:
         run_setup()
     else:
-        main()
+        try:
+            picam = Picamera2()
+            configure_autofocus(picam, args.af)
+            main()
+        except Exception as e:
+            logger.error(f"Startup error: {e}", exc_info=True)
+            sys.exit(1)
